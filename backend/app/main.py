@@ -1,114 +1,118 @@
-"""NeuroScope FastAPI Backend Server."""
+"""FastAPI Application for NeuroScope."""
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import uuid
-from typing import Any, Dict
-import numpy as np
+from typing import Any, Dict, List
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.adapters.keras import KerasAdapter
 from app.adapters.tree import TreeAdapter
-from app.formats import detect_format
+from app.core.format_sniffer import sniff_format
+from app.schemas import ModelView
 
-app = FastAPI(title="NeuroScope API", version="0.1.0")
+app = FastAPI(title="NeuroScope Backend API", version="0.1.0")
 
+# Enable CORS for Vite frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-models_store: Dict[str, Any] = {}
+# In-memory storage for loaded adapters
+LOADED_MODELS: Dict[str, Any] = {}
+TEMP_FILES: List[str] = []
 
 
-class InferenceRequest(BaseModel):
-    data: Any
+class PredictRequest(BaseModel):
+    data: List[Any]
 
 
-@app.get("/api/health")
-def health_check():
-    return {"status": "ok", "service": "NeuroScope"}
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
 
 
 @app.post("/api/models/upload")
 async def upload_model(file: UploadFile = File(...)):
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
+    TEMP_FILES.append(tmp_path)
 
     try:
-        detection = detect_format(contents, file.filename or "")
+        fmt = sniff_format(tmp_path)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise HTTPException(status_code=400, detail=f"Sniffing error: {str(e)}")
 
-    fmt = detection.format
-    if fmt in ("keras", "keras_h5"):
+    if fmt in ["keras_zip", "h5"]:
         try:
-            adapter = KerasAdapter.from_bytes(contents, file.filename or "model", fmt)
+            adapter = KerasAdapter(tmp_path)
         except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Failed to parse Keras model: {str(e)}")
-    elif fmt == "json_tree":
+            raise HTTPException(status_code=400, detail=f"Failed loading Keras model: {str(e)}")
+    elif fmt == "json":
         try:
-            adapter = TreeAdapter.from_json(contents.decode("utf-8"))
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            adapter = TreeAdapter(content)
         except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Failed to parse Tree model: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Failed loading tree model: {str(e)}")
     else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Refused or unsupported format '{fmt}': {detection.note}",
-        )
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}")
 
     model_id = str(uuid.uuid4())
-    models_store[model_id] = adapter
+    LOADED_MODELS[model_id] = adapter
 
     return {
         "model_id": model_id,
         "format": fmt,
         "filename": file.filename,
-        "note": detection.note,
     }
 
 
-@app.get("/api/models/{model_id}")
-def get_model(model_id: str):
-    adapter = models_store.get(model_id)
+@app.get("/api/models/{model_id}", response_model=ModelView)
+def inspect_model(model_id: str):
+    adapter = LOADED_MODELS.get(model_id)
     if not adapter:
-        raise HTTPException(status_code=404, detail="Model not found.")
-    return adapter.inspect().to_dict()
+        raise HTTPException(status_code=404, detail="Model not found")
+    try:
+        return adapter.inspect()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error inspecting model: {str(e)}")
 
 
 @app.post("/api/models/{model_id}/predict")
-def run_predict(model_id: str, req: InferenceRequest):
-    adapter = models_store.get(model_id)
+def predict_model(model_id: str, req: PredictRequest):
+    adapter = LOADED_MODELS.get(model_id)
     if not adapter:
-        raise HTTPException(status_code=404, detail="Model not found.")
-
+        raise HTTPException(status_code=404, detail="Model not found")
     try:
-        arr = np.array(req.data, dtype=np.float32)
-        preds = adapter.predict(arr)
-        return {"predictions": preds.tolist()}
-    except NotImplementedError:
-        raise HTTPException(status_code=400, detail="Inference not supported for this model.")
+        preds = adapter.predict(req.data)
+        return {"predictions": preds}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Inference error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
 
 @app.post("/api/models/{model_id}/activations")
-def extract_activations(model_id: str, req: InferenceRequest):
-    adapter = models_store.get(model_id)
+def get_model_activations(model_id: str, req: PredictRequest):
+    adapter = LOADED_MODELS.get(model_id)
     if not adapter:
-        raise HTTPException(status_code=404, detail="Model not found.")
-
+        raise HTTPException(status_code=404, detail="Model not found")
     try:
-        arr = np.array(req.data, dtype=np.float32)
-        trace_data = adapter.trace(arr)
-        return {"activations": trace_data}
-    except NotImplementedError:
-        raise HTTPException(status_code=400, detail="Activation tracing not supported for this model.")
+        acts = adapter.get_activations(req.data)
+        return {"activations": acts}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Tracing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Activation error: {str(e)}")

@@ -1,13 +1,28 @@
+"""Base adapter class defining canonical interface."""
+
+from __future__ import annotations
 from abc import ABC, abstractmethod
-import numpy as np
-from ..schema import ModelView
+from typing import Any, Dict
+from app.schemas import ModelView
+
 
 class Adapter(ABC):
-    """One adapter per format family. Unsupported operations raise NotImplementedError."""
-    format_ids: tuple = ()
+    """Canonical abstract adapter for all ML framework formats."""
+
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+
     @abstractmethod
-    def inspect(self) -> ModelView: ...
-    def parameters(self) -> dict[str, np.ndarray]: raise NotImplementedError
-    def predict(self, x: np.ndarray) -> np.ndarray: raise NotImplementedError
-    def trace(self, x: np.ndarray) -> dict: raise NotImplementedError
-    def with_edit(self, name: str, index: tuple, value: float) -> "Adapter": raise NotImplementedError
+    def inspect(self) -> ModelView:
+        """Parse topology and attributes into canonical ModelView schema."""
+        pass
+
+    @abstractmethod
+    def predict(self, input_data: Any) -> Any:
+        """Execute forward pass inference."""
+        pass
+
+    @abstractmethod
+    def get_activations(self, input_data: Any) -> Dict[str, Any]:
+        """Trace layer activations."""
+        pass

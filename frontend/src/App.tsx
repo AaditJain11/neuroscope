@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertCircle,
+  Loader2,
 } from 'lucide-react';
 import type { ModelView } from './types';
 import { NetworkCanvas } from './components/NetworkCanvas';
@@ -20,9 +21,9 @@ export default function App() {
   const [modelView, setModelView] = useState<ModelView | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'network' | 'inference' | 'activations'>('network');
+  const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Inference state
   const [inputVector, setInputVector] = useState<string>('0.5, -1.2, 0.3, 2.1');
   const [predictionResult, setPredictionResult] = useState<any>(null);
   const [activationResult, setActivationResult] = useState<any>(null);
@@ -31,6 +32,7 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setLoading(true);
     setErrorMsg(null);
     setPredictionResult(null);
     setActivationResult(null);
@@ -45,8 +47,8 @@ export default function App() {
       });
 
       if (!uploadRes.ok) {
-        const err = await uploadRes.json();
-        throw new Error(err.detail || 'Upload failed');
+        const err = await uploadRes.json().catch(() => ({}));
+        throw new Error(err.detail || `Upload failed with HTTP ${uploadRes.status}`);
       }
 
       const uploadData = await uploadRes.json();
@@ -54,12 +56,20 @@ export default function App() {
       setModelId(newModelId);
 
       const inspectRes = await fetch(`${API_BASE}/api/models/${newModelId}`);
-      if (!inspectRes.ok) throw new Error('Failed to fetch model architecture');
+      if (!inspectRes.ok) {
+        throw new Error('Failed to fetch model architecture from backend');
+      }
+
       const view: ModelView = await inspectRes.json();
       setModelView(view);
       setSelectedNodeId(view.nodes[0]?.id || null);
     } catch (err: any) {
+      console.error(err);
       setErrorMsg(err.message || 'Error uploading file');
+    } finally {
+      setLoading(false);
+      // Reset input value so re-selecting same file triggers onChange
+      e.target.value = '';
     }
   };
 
@@ -101,7 +111,6 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-surface-950 text-zinc-100 select-none">
-      {/* Top Header */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-surface-800 bg-surface-900 z-10">
         <div className="flex items-center space-x-3">
           <div className="w-8 h-8 rounded-lg bg-brand-amber/10 border border-brand-amber/40 flex items-center justify-center text-brand-amber">
@@ -113,21 +122,24 @@ export default function App() {
 
         <div className="flex items-center space-x-4">
           <label className="flex items-center space-x-2 px-3 py-1.5 rounded-md text-sm font-medium bg-surface-850 hover:bg-surface-800 border border-surface-700 cursor-pointer transition">
-            <Upload size={15} className="text-brand-amber" />
-            <span>Upload (.keras, .h5, JSON)</span>
+            {loading ? (
+              <Loader2 size={15} className="animate-spin text-brand-amber" />
+            ) : (
+              <Upload size={15} className="text-brand-amber" />
+            )}
+            <span>{loading ? 'Uploading & Parsing...' : 'Upload (.keras, .h5, JSON)'}</span>
             <input
               type="file"
               className="hidden"
               accept=".keras,.h5,.json"
               onChange={handleFileUpload}
+              disabled={loading}
             />
           </label>
         </div>
       </header>
 
-      {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar */}
         <aside className="w-80 border-r border-surface-800 bg-surface-900 flex flex-col p-4 overflow-y-auto space-y-5">
           <div>
             <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">Model Info</h2>
@@ -179,7 +191,6 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Center Canvas */}
         <main className="flex-1 flex flex-col bg-surface-950 overflow-hidden">
           <div className="flex border-b border-surface-800 bg-surface-900 px-4 space-x-1">
             <button
@@ -219,9 +230,9 @@ export default function App() {
 
           <div className="flex-1 relative overflow-hidden">
             {errorMsg && (
-              <div className="absolute top-4 left-4 right-4 z-50 bg-red-950/80 border border-red-500/50 text-red-200 px-4 py-2 rounded text-xs flex justify-between items-center">
-                <span>{errorMsg}</span>
-                <button onClick={() => setErrorMsg(null)} className="font-bold ml-2">×</button>
+              <div className="absolute top-4 left-4 right-4 z-50 bg-red-950 border border-red-500 text-red-200 px-4 py-3 rounded text-xs flex justify-between items-center shadow-2xl">
+                <span><strong>Error:</strong> {errorMsg}</span>
+                <button onClick={() => setErrorMsg(null)} className="font-bold ml-4 text-base leading-none">×</button>
               </div>
             )}
 
@@ -296,7 +307,6 @@ export default function App() {
           </div>
         </main>
 
-        {/* Right Inspector */}
         <aside className="w-80 border-l border-surface-800 bg-surface-900 flex flex-col p-4 overflow-y-auto">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-3 flex items-center space-x-1.5">
             <Sliders size={14} />
